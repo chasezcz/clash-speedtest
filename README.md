@@ -6,7 +6,10 @@ Features:
 1. 无需额外的配置，直接将 Clash/Mihomo 配置本地文件路径或者订阅地址作为参数传入即可
 2. 支持 Proxies 和 Proxy Provider 中定义的全部类型代理节点，兼容性跟 Mihomo 一致
 3. 不依赖额外的 Clash/Mihomo 进程实例，单一工具即可完成测试
-4. 代码简单而且开源，不发布构建好的二进制文件，保证你的节点安全
+4. 代码简单而且开源，保证你的节点安全
+5. 支持 AI 服务解锁检测（OpenAI/Claude/Codex）
+6. 支持自定义重命名模板，内置本地 GeoIP 数据库
+7. 输出 YAML 的同时自动生成 CSV 全量报告
 
 <img width="1346" height="682" alt="Image" src="https://github.com/user-attachments/assets/9fea1d47-251f-4c49-b059-05b5962d4e72" />
 
@@ -64,7 +67,7 @@ Usage of clash-speedtest:
   -output string
         output config file path (default "")
   -max-latency duration
-        filter latency greater than this value (default 800ms)
+        filter latency greater than this value (default 1s)
   -max-packet-loss float
         filter packet loss greater than this value(unit: %) (default 100)
   -min-download-speed float
@@ -74,7 +77,22 @@ Usage of clash-speedtest:
   -early-stop int
         stop testing after this many results pass filters (0 disables)
   -rename
-        rename nodes with IP location and speed
+        rename nodes with IP location and speed (default true)
+  -rename-template string
+        name template for renaming (Go text/template). Placeholders:
+        {{.Flag}}, {{.CountryCode}}, {{.Index}}, {{.Direction}}, {{.Speed}},
+        {{.SpeedUnit}}, {{.LatencyMs}}, {{.DownloadSpeedMBps}}, {{.UploadSpeedMBps}},
+        {{.Source}}, {{.JitterMs}}, {{.PacketLossPct}}, {{.Origin}}, {{.Unlock}}
+  -latency-retries int
+        latency test rounds, 6 pings per round (default 2)
+  -unlock
+        check AI service unlock status (OpenAI/Claude/Codex)
+  -unlock-timeout duration
+        unlock detection timeout (default 30s)
+  -geoip-db string
+        GeoIP MMDB database path (default: ~/.config/clash-speedtest/country.mmdb)
+  -update-geoip
+        download/update GeoIP database and exit
   -fast
         fast mode (alias for --speed-mode fast)
   -gist-token string
@@ -118,6 +136,12 @@ Premium|广港|IEPL|05                        	3.87MB/s    	249.00ms
 # 重命名后的节点名称格式：🇺🇸 US 001 | ⬇️ 15.67MB/s
 # 包含国旗 emoji、国家代码和下载速度
 
+# 5.1 自定义重命名模板
+> clash-speedtest -c config.yaml -output result.yaml -rename-template '[{{.Source}}]{{.Flag}}{{.CountryCode}}|{{.LatencyMs}}|{{.DownloadSpeedMBps}}|{{.Unlock}}|{{.Origin}}'
+# 支持的占位符：{{.Flag}} {{.CountryCode}} {{.Index}} {{.Direction}} {{.Speed}} {{.SpeedUnit}}
+# {{.LatencyMs}} {{.DownloadSpeedMBps}} {{.UploadSpeedMBps}} {{.Source}} {{.JitterMs}}
+# {{.PacketLossPct}} {{.Origin}} {{.Unlock}}
+
 # 6. 快速测试模式
 > clash-speedtest -f 'HK' -fast -c ~/.config/clash/config.yaml
 # 此命令将只测试节点延迟，跳过其他测试项目，适用于：
@@ -144,6 +168,16 @@ Premium|广港|IEPL|05                        	3.87MB/s    	249.00ms
 
 # 9. 上传到 GitHub 仓库指定分支与路径
 > clash-speedtest -c config.yaml -output result.yaml -repo-token "ghp_xxx" -repo-address "https://github.com/user/repo" -repo-file-path "configs/subscriptions/result.yaml" -repo-branch "main"
+
+# 10. 检测 AI 服务解锁状态
+> clash-speedtest -c config.yaml -output result.yaml -unlock
+# 测试完成后会检测每个节点是否能访问 OpenAI/Claude/Codex
+# 解锁结果会体现在节点名称中（使用 -rename 时）和 CSV 的 Unlock 列
+
+# 11. 更新本地 GeoIP 数据库
+> clash-speedtest -update-geoip
+# 下载 MaxMind GeoLite2 Country MMDB 到 ~/.config/clash-speedtest/country.mmdb
+# 使用自定义路径：-geoip-db /path/to/country.mmdb
 ```
 
 ## GitHub Token 创建与权限
@@ -215,6 +249,7 @@ clash-speedtest --server-url "https://speed.cloudflare.com" --speed-mode full
 测试结果：
 1. 带宽 是指下载指定大小文件的速度，即一般理解中的下载速度。当这个数值越高时表明节点的出口带宽越大。
 2. 延迟 是指 HTTP GET 请求拿到第一个字节的的响应时间，即一般理解中的 TTFB。当这个数值越低时表明你本地到达节点的延迟越低，可能意味着中转节点有 BGP 部署、出海线路是 IEPL、IPLC 等。
+3. 使用 `-output` 时会同时生成 YAML（筛选后）和 CSV（全量记录），CSV 包含 Source、Name、Type、Server、Port、Latency、Jitter、PacketLoss、DownloadSpeed、UploadSpeed、Unlock、DownloadError、UploadError 共 13 列。
 
 请注意带宽跟延迟是两个独立的指标，两者并不关联：
 1. 可能带宽很高但是延迟也很高，这种情况下你下载速度很快但是打开网页的时候却很慢，可能是是中转节点没有 BGP 加速，但出海线路带宽很充足。
