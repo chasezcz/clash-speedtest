@@ -129,3 +129,20 @@ func TestDeduplicateProxies(t *testing.T) {
 		}
 	})
 }
+
+func TestCProxySourceField(t *testing.T) {
+	proxy := &CProxy{
+		Config: map[string]any{"server": "1.1.1.1", "port": 443},
+		Source: "config1",
+	}
+	if proxy.Source != "config1" {
+		t.Fatalf("expected source config1, got %q", proxy.Source)
+	}
+}
+
+func TestResultSourceField(t *testing.T) {
+	result := &Result{Source: "config2"}
+	if result.Source != "config2" {
+		t.Fatalf("expected source config2, got %q", result.Source)
+	}
+}

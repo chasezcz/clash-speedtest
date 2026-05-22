@@ -39,12 +39,30 @@ type NodeNameData struct {
 	LatencyMs         string // latency in milliseconds
 	DownloadSpeedMBps string // download MB/s
 	UploadSpeedMBps   string // upload MB/s
+	Source            string // config source name
+	JitterMs          string // jitter in milliseconds
+	PacketLossPct     string // packet loss percentage
+	Origin            string // original proxy name before rename
+	Unlock            string // unlocked AI services, e.g. "OpenAI|Claude"
+}
+
+// RenameParams 参数化重命名所需的全部数据。
+type RenameParams struct {
+	Source         string
+	OriginName     string
+	CountryCode    string
+	Latency        time.Duration
+	Jitter         time.Duration
+	PacketLoss     float64
+	DownloadSpeed  float64
+	UploadSpeed    float64
+	UnlockServices []string
 }
 
 // GenerateNodeNameFromTemplate renders name from a text/template. Placeholders:
-// {{.Flag}}, {{.CountryCode}}, {{.Index}}, {{.Direction}}, {{.Speed}}, {{.SpeedUnit}}, {{.LatencyMs}}, {{.DownloadSpeedMBps}}, {{.UploadSpeedMBps}}.
+// {{.Flag}}, {{.CountryCode}}, {{.Index}}, {{.Direction}}, {{.Speed}}, {{.SpeedUnit}}, {{.LatencyMs}}, {{.DownloadSpeedMBps}}, {{.UploadSpeedMBps}}, {{.Source}}, {{.JitterMs}}, {{.PacketLossPct}}, {{.Origin}}, {{.Unlock}}.
 // If template is empty, DefaultNameTemplate is used. On execute error, falls back to default format.
-func GenerateNodeNameFromTemplate(tmpl string, countryCode string, latency time.Duration, downloadSpeed, uploadSpeed float64, nameCount map[string]int) (string, error) {
+func GenerateNodeNameFromTemplate(tmpl string, params RenameParams, nameCount map[string]int) (string, error) {
 	if tmpl == "" {
 		tmpl = DefaultNameTemplate
 	}
@@ -52,7 +70,7 @@ func GenerateNodeNameFromTemplate(tmpl string, countryCode string, latency time.
 	if err != nil {
 		return "", err
 	}
-	data := buildNodeNameData(countryCode, latency, downloadSpeed, uploadSpeed, nameCount)
+	data := buildNodeNameData(params, nameCount)
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, data); err != nil {
 		// fallback to default format so caller does not double-increment nameCount
@@ -61,21 +79,21 @@ func GenerateNodeNameFromTemplate(tmpl string, countryCode string, latency time.
 	return buf.String(), nil
 }
 
-func buildNodeNameData(countryCode string, latency time.Duration, downloadSpeed, uploadSpeed float64, nameCount map[string]int) NodeNameData {
-	flag, exists := countryFlags[strings.ToUpper(countryCode)]
+func buildNodeNameData(params RenameParams, nameCount map[string]int) NodeNameData {
+	flag, exists := countryFlags[strings.ToUpper(params.CountryCode)]
 	if !exists {
 		flag = "🏳️"
 	}
-	upperCountryCode := strings.ToUpper(countryCode)
-	speed := downloadSpeed
+	upperCountryCode := strings.ToUpper(params.CountryCode)
+	speed := params.DownloadSpeed
 	direction := "⬇️"
 	speedUnit := "MB/s"
-	if downloadSpeed <= 0 {
-		speed = uploadSpeed
+	if params.DownloadSpeed <= 0 {
+		speed = params.UploadSpeed
 		direction = "⬆️"
 	}
-	if downloadSpeed <= 0 && uploadSpeed <= 0 && latency > 0 {
-		speed = float64(latency.Milliseconds())
+	if params.DownloadSpeed <= 0 && params.UploadSpeed <= 0 && params.Latency > 0 {
+		speed = float64(params.Latency.Milliseconds())
 		direction = "⚡"
 		speedUnit = "ms"
 	}
@@ -85,11 +103,15 @@ func buildNodeNameData(countryCode string, latency time.Duration, downloadSpeed,
 	}
 	count := nameCount[upperCountryCode] + 1
 	nameCount[upperCountryCode] = count
-	dlMBps := downloadSpeed / (1024 * 1024)
-	ulMBps := uploadSpeed / (1024 * 1024)
+	dlMBps := params.DownloadSpeed / (1024 * 1024)
+	ulMBps := params.UploadSpeed / (1024 * 1024)
 	latencyMs := "N/A"
-	if latency > 0 {
-		latencyMs = fmt.Sprintf("%d", latency.Milliseconds())
+	if params.Latency > 0 {
+		latencyMs = fmt.Sprintf("%d", params.Latency.Milliseconds())
+	}
+	jitterMs := "N/A"
+	if params.Jitter > 0 {
+		jitterMs = fmt.Sprintf("%d", params.Jitter.Milliseconds())
 	}
 	return NodeNameData{
 		Flag:              flag,
@@ -101,10 +123,15 @@ func buildNodeNameData(countryCode string, latency time.Duration, downloadSpeed,
 		LatencyMs:         latencyMs,
 		DownloadSpeedMBps: fmt.Sprintf("%.2f", dlMBps),
 		UploadSpeedMBps:   fmt.Sprintf("%.2f", ulMBps),
+		Source:            params.Source,
+		JitterMs:          jitterMs,
+		PacketLossPct:     fmt.Sprintf("%.1f", params.PacketLoss),
+		Origin:            params.OriginName,
+		Unlock:            strings.Join(params.UnlockServices, "|"),
 	}
 }
 
-func GenerateNodeName(countryCode string, latency time.Duration, downloadSpeed float64, uploadSpeed float64, nameCount map[string]int) string {
-	name, _ := GenerateNodeNameFromTemplate("", countryCode, latency, downloadSpeed, uploadSpeed, nameCount)
+func GenerateNodeName(params RenameParams, nameCount map[string]int) string {
+	name, _ := GenerateNodeNameFromTemplate("", params, nameCount)
 	return name
 }

@@ -134,6 +134,37 @@ func TestUpdateFile(t *testing.T) {
 	})
 }
 
+func TestUpdateFiles(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("expected PATCH, got %s", r.Method)
+		}
+		var req updateRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		if len(req.Files) != 2 {
+			t.Errorf("expected 2 files, got %d", len(req.Files))
+		}
+		if _, ok := req.Files["output.yaml"]; !ok {
+			t.Error("missing output.yaml")
+		}
+		if _, ok := req.Files["output.csv"]; !ok {
+			t.Error("missing output.csv")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	uploader := NewUploaderWithBase(server.Client(), server.URL)
+	files := map[string][]byte{
+		"output.yaml": []byte("proxies: []"),
+		"output.csv":  []byte("Source,Name\n"),
+	}
+	err := uploader.UpdateFiles("test-token", "abc123", files)
+	if err != nil {
+		t.Fatalf("UpdateFiles error: %v", err)
+	}
+}
+
 func TestProxyFromEnvironmentForHTTPS(t *testing.T) {
 	t.Setenv("HTTP_PROXY", "http://127.0.0.1:18080")
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:18443")

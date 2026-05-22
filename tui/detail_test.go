@@ -11,7 +11,7 @@ import (
 
 func TestTUIModelDetailPanelToggle(t *testing.T) {
 	resultChannel := make(chan *speedtester.Result, 10)
-	model := NewTUIModel(speedtester.SpeedModeFull, 1, resultChannel)
+	model := NewTUIModel(speedtester.SpeedModeFull, 1, resultChannel, nil)
 	model.windowWidth = 120
 	model.windowHeight = 40
 
@@ -65,7 +65,7 @@ func TestTUIModelDetailPanelToggle(t *testing.T) {
 
 func TestTUIModelDetailPanelSwitchOnClick(t *testing.T) {
 	resultChannel := make(chan *speedtester.Result, 10)
-	model := NewTUIModel(speedtester.SpeedModeFull, 2, resultChannel)
+	model := NewTUIModel(speedtester.SpeedModeFull, 2, resultChannel, nil)
 	model.windowWidth = 120
 	model.windowHeight = 40
 
@@ -119,7 +119,7 @@ func TestTUIModelDetailPanelSwitchOnClick(t *testing.T) {
 
 func TestTUIModelDetailPanelEscRestoresLayout(t *testing.T) {
 	resultChannel := make(chan *speedtester.Result, 10)
-	model := NewTUIModel(speedtester.SpeedModeDownload, 1, resultChannel)
+	model := NewTUIModel(speedtester.SpeedModeDownload, 1, resultChannel, nil)
 	model.windowWidth = 120
 	model.windowHeight = 40
 
@@ -182,7 +182,7 @@ func TestBuildDetailContentDownloadOnly(t *testing.T) {
 
 func TestDetailPanelHeightUpdatesOnSelectionChange(t *testing.T) {
 	resultChannel := make(chan *speedtester.Result, 10)
-	model := NewTUIModel(speedtester.SpeedModeFull, 2, resultChannel)
+	model := NewTUIModel(speedtester.SpeedModeFull, 2, resultChannel, nil)
 	model.windowWidth = 80
 	model.windowHeight = 30
 

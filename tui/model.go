@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
@@ -27,6 +28,29 @@ type doneMsg struct{}
 type timerTickMsg struct{}
 
 type flushResultsMsg struct{}
+
+type saveStatusMsg struct {
+	YamlPath string
+	CsvPath  string
+	GistOK   bool
+	GistErr  string
+	RepoOK   bool
+	RepoErr  string
+}
+
+type saveCompleteMsg struct {
+	SaveResult
+}
+
+// SaveResult is returned by the save callback to report save/upload status.
+type SaveResult struct {
+	YamlPath string
+	CsvPath  string
+	GistOK   bool
+	GistErr  string
+	RepoOK   bool
+	RepoErr  string
+}
 
 // tuiModel represents the Bubble Tea model for the TUI
 type tuiModel struct {
@@ -55,6 +79,8 @@ type tuiModel struct {
 	flushScheduled bool
 	detailHeight   int
 	perf           *perfTracker
+	saveCallback   func() SaveResult
+	saveStatus     string
 }
 
 const (
@@ -71,7 +97,7 @@ var selectedRowStyle = lipgloss.NewStyle().
 	Bold(true)
 
 // NewTUIModel creates a new TUI model
-func NewTUIModel(mode speedtester.SpeedMode, totalProxies int, resultChannel chan *speedtester.Result) tuiModel {
+func NewTUIModel(mode speedtester.SpeedMode, totalProxies int, resultChannel chan *speedtester.Result, saveCallback func() SaveResult) tuiModel {
 	// Initialize progress bar
 	p := progress.New(
 		progress.WithDefaultGradient(),
@@ -126,6 +152,7 @@ func NewTUIModel(mode speedtester.SpeedMode, totalProxies int, resultChannel cha
 		flushScheduled: false,
 		detailHeight:   0,
 		perf:           newPerfTracker(),
+		saveCallback:   saveCallback,
 	}
 }
 
@@ -245,8 +272,19 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.testing = false
 		m.flushScheduled = false
 		m.flushResultsIfDirty()
-		progressCmd := m.progress.SetPercent(1.0)
-		return m, progressCmd
+		m.progress.SetPercent(1.0)
+		if m.saveCallback != nil {
+			m.saveStatus = "正在保存..."
+			return m, func() tea.Msg {
+				r := m.saveCallback()
+				return saveCompleteMsg{SaveResult: r}
+			}
+		}
+		return m, tea.Quit
+
+	case saveCompleteMsg:
+		m.saveStatus = formatSaveStatus(msg.YamlPath, msg.CsvPath, msg.GistOK, msg.GistErr, msg.RepoOK, msg.RepoErr)
+		return m, tea.Quit
 
 	case progressMsg:
 		m.currentProxy = msg.current
@@ -259,6 +297,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd = progressCmd
 
 		return m, cmd
+
+	case saveStatusMsg:
+		m.saveStatus = formatSaveStatus(msg.YamlPath, msg.CsvPath, msg.GistOK, msg.GistErr, msg.RepoOK, msg.RepoErr)
+		return m, nil
 
 	case timerTickMsg:
 		return m, timerTickCmd()
@@ -275,6 +317,21 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	cmd = progressCmd
 
 	return m, cmd
+}
+
+func formatSaveStatus(yamlPath, csvPath string, gistOK bool, gistErr string, repoOK bool, repoErr string) string {
+	status := fmt.Sprintf("✓ 已保存到 %s, %s", yamlPath, csvPath)
+	if gistOK {
+		status += " | gist 已上传"
+	} else if gistErr != "" {
+		status += fmt.Sprintf(" | gist 上传失败: %s", gistErr)
+	}
+	if repoOK {
+		status += " | repo 已上传"
+	} else if repoErr != "" {
+		status += fmt.Sprintf(" | repo 上传失败: %s", repoErr)
+	}
+	return status
 }
 
 // View renders the TUI
@@ -298,6 +355,9 @@ func (m tuiModel) View() string {
 	helpView := m.help.view()
 	if helpView != "" {
 		sections = append(sections, "", helpView)
+	}
+	if m.saveStatus != "" {
+		sections = append(sections, "", m.saveStatus)
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, sections...)
 }

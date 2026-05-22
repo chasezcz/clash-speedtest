@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/faceair/clash-speedtest/output"
 	"github.com/faceair/clash-speedtest/speedtester"
 	"github.com/faceair/clash-speedtest/tui"
+	"github.com/faceair/clash-speedtest/unlock"
 	mihomolog "github.com/metacubex/mihomo/log"
 	"gopkg.in/yaml.v2"
 )
@@ -48,10 +50,15 @@ var (
 	minUploadSpeed    = flag.Float64("min-upload-speed", 2, "filter upload speed less than this value(unit: MB/s, full mode only)")
 	earlyStop         = flag.Int("early-stop", 0, "stop testing after this many results pass filters (0 disables)")
 	renameNodes       = flag.Bool("rename", true, "rename nodes with IP location and speed")
-	renameTemplate    = flag.String("rename-template", "", "name template for renaming (Go text/template). Placeholders: {{.Flag}}, {{.CountryCode}}, {{.Index}}, {{.Direction}}, {{.Speed}}, {{.SpeedUnit}}, {{.LatencyMs}}, {{.DownloadSpeedMBps}}, {{.UploadSpeedMBps}}. Empty = default format")
+	renameTemplate    = flag.String("rename-template", "", "name template for renaming (Go text/template). Placeholders: {{.Flag}}, {{.CountryCode}}, {{.Index}}, {{.Direction}}, {{.Speed}}, {{.SpeedUnit}}, {{.LatencyMs}}, {{.DownloadSpeedMBps}}, {{.UploadSpeedMBps}}, {{.Source}}, {{.JitterMs}}, {{.PacketLossPct}}, {{.Origin}}, {{.Unlock}}. Empty = default format")
 	fastMode          = flag.Bool("fast", false, "fast mode (alias for --speed-mode fast)")
 	versionFlag       = flag.Bool("v", false, "show version information")
 	userAgent         = flag.String("ua", "", "User-Agent for fetching config from http(s) URL (default: mihomo kernel UA, e.g. mihomo/1.10.0)")
+	geoipDB           = flag.String("geoip-db", "", "GeoIP MMDB database path (default: ~/.config/clash-speedtest/country.mmdb)")
+	updateGeoIP       = flag.Bool("update-geoip", false, "download/update GeoIP database and exit")
+	unlockCheck       = flag.Bool("unlock", false, "检测 AI 服务解锁状态（OpenAI/Claude/Codex）")
+	unlockTimeout     = flag.Duration("unlock-timeout", 30*time.Second, "解锁检测超时")
+	latencyRetries    = flag.Int("latency-retries", 2, "延迟测试轮数，每轮 6 次 ping")
 )
 
 func main() {
@@ -62,6 +69,22 @@ func main() {
 	if *versionFlag {
 		fmt.Printf("clash-speedtest version %s (commit %s)\n", version, commit)
 		os.Exit(0)
+	}
+
+	// Handle GeoIP update flag
+	if *updateGeoIP {
+		if *geoipDB != "" {
+			ip.SetGeoIPPath(*geoipDB)
+		}
+		if err := ip.UpdateGeoIP(); err != nil {
+			log.Fatalf("更新 GeoIP 数据库失败: %s", err)
+		}
+		os.Exit(0)
+	}
+
+	// Set GeoIP database path
+	if *geoipDB != "" {
+		ip.SetGeoIPPath(*geoipDB)
 	}
 
 	if *configPathsConfig == "" {
@@ -93,6 +116,8 @@ func main() {
 		Mode:             requestedMode,
 		OutputPath:       *outputPath,
 		UserAgent:        *userAgent,
+		LatencyRetries:   *latencyRetries,
+		PostTest:         buildPostTestCallback(*unlockCheck, *unlockTimeout),
 	})
 	if err != nil {
 		log.Fatalf("create speed tester failed: %s", err)
@@ -127,7 +152,6 @@ func main() {
 		// Run TUI for Interactive mode
 		resultChannel := make(chan *speedtester.Result, len(allProxies))
 		resultsDone := make(chan struct{})
-		saveResult := make(chan error, 1)
 
 		// Start testing in goroutine to send results to channel
 		go func() {
@@ -142,34 +166,36 @@ func main() {
 			close(resultsDone)
 		}()
 
+		var saveCallback func() tui.SaveResult
 		if collectResults {
-			// Save results once all tests finish, without blocking the TUI loop.
-			go func() {
+			saveCallback = func() tui.SaveResult {
 				<-resultsDone
 				results = output.SortResults(results, effectiveMode)
-				saveResult <- saveConfig(results, resultFilter)
-			}()
+				out, err := saveConfig(results, resultFilter)
+				sr := tui.SaveResult{
+					YamlPath: out.yamlPath,
+					CsvPath:  out.csvPath,
+					GistOK:   out.gistOK,
+					GistErr:  out.gistErr,
+					RepoOK:   out.repoOK,
+					RepoErr:  out.repoErr,
+				}
+				if err != nil {
+					sr.GistErr = err.Error()
+				}
+				return sr
+			}
 		}
 
 		// Create and run TUI
 		p := tea.NewProgram(
-			tui.NewTUIModel(effectiveMode, len(allProxies), resultChannel),
+			tui.NewTUIModel(effectiveMode, len(allProxies), resultChannel, saveCallback),
 			tea.WithAltScreen(),
 			tea.WithMouseAllMotion(),
 		)
 		if _, err := p.Run(); err != nil {
 			log.Fatalf("TUI failed: %s", err)
 		}
-
-		if !collectResults {
-			return
-		}
-
-		err = <-saveResult
-		if err != nil {
-			log.Fatalf("save config file failed: %s", err)
-		}
-		fmt.Printf("\nsave config file to: %s\n", *outputPath)
 		return
 	}
 
@@ -188,15 +214,24 @@ func main() {
 	results = output.SortResults(results, effectiveMode)
 
 	if *outputPath != "" {
-		err = saveConfig(results, resultFilter)
+		out, err := saveConfig(results, resultFilter)
 		if err != nil {
 			log.Fatalf("save config file failed: %s", err)
 		}
-		fmt.Printf("\nsave config file to: %s\n", *outputPath)
+		fmt.Printf("\n配置已保存到: %s\n", out.yamlPath)
 	}
 }
 
-func saveConfig(results []*speedtester.Result, filter resultFilter) error {
+type saveOutcome struct {
+	yamlPath string
+	csvPath  string
+	gistOK   bool
+	gistErr  string
+	repoOK   bool
+	repoErr  string
+}
+
+func saveConfig(results []*speedtester.Result, filter resultFilter) (saveOutcome, error) {
 	proxies := make([]map[string]any, 0)
 	nameCount := make(map[string]int) // Track name usage to avoid duplicates
 
@@ -210,38 +245,66 @@ func saveConfig(results []*speedtester.Result, filter resultFilter) error {
 			continue
 		}
 		if *renameNodes {
-			location, err := ip.GetIPLocation(proxyConfig["server"].(string))
-			if err != nil || location.CountryCode == "" {
+			var location *ip.IPLocation
+			if result.Proxy != nil {
+				location, _ = ip.GetIPLocationViaProxy(result.Proxy)
+			}
+			if location == nil || location.CountryCode == "" {
 				proxies = append(proxies, proxyConfig)
 				continue
 			}
-			name, err := ip.GenerateNodeNameFromTemplate(*renameTemplate, location.CountryCode, result.Latency, result.DownloadSpeed, result.UploadSpeed, nameCount)
+			originName, _ := proxyConfig["name"].(string)
+			renameParams := ip.RenameParams{
+				Source:         result.Source,
+				OriginName:     originName,
+				CountryCode:    location.CountryCode,
+				Latency:        result.Latency,
+				Jitter:         result.Jitter,
+				PacketLoss:     result.PacketLoss,
+				DownloadSpeed:  result.DownloadSpeed,
+				UploadSpeed:    result.UploadSpeed,
+				UnlockServices: result.UnlockServices,
+			}
+			name, err := ip.GenerateNodeNameFromTemplate(*renameTemplate, renameParams, nameCount)
 			if err != nil {
-				log.Printf("rename template parse error: %s, use default name", err)
-				name = ip.GenerateNodeName(location.CountryCode, result.Latency, result.DownloadSpeed, result.UploadSpeed, nameCount)
+				log.Printf("重命名模板解析错误: %s，使用默认名称", err)
+				name = ip.GenerateNodeName(renameParams, nameCount)
 			}
 			proxyConfig["name"] = name
 		}
 		proxies = append(proxies, proxyConfig)
 	}
 
-	config := &speedtester.RawConfig{
-		Proxies: proxies,
+	out := saveOutcome{
+		yamlPath: *outputPath,
+		csvPath:  output.CSVPathFromYAML(*outputPath),
 	}
-	yamlData, err := yaml.Marshal(config)
+
+	yamlData, err := marshalConfigNoWrap(proxies)
 	if err != nil {
-		return err
+		return out, err
 	}
 
 	if err := os.WriteFile(*outputPath, yamlData, 0o644); err != nil {
-		return err
+		return out, err
 	}
 	outputFilename := filepath.Base(filepath.Clean(*outputPath))
 
+	if err := output.WriteCSV(out.csvPath, results); err != nil {
+		log.Printf("写入 CSV 失败: %s", err)
+	}
+
 	if *gistToken != "" && *gistAddress != "" {
 		uploader := gist.NewUploader(nil)
-		if err := uploader.UpdateFile(*gistToken, *gistAddress, outputFilename, yamlData); err != nil {
-			log.Printf("update gist failed: %s", err)
+		files := map[string][]byte{outputFilename: yamlData}
+		if csvData, err := os.ReadFile(out.csvPath); err == nil {
+			files[filepath.Base(out.csvPath)] = csvData
+		}
+		if err := uploader.UpdateFiles(*gistToken, *gistAddress, files); err != nil {
+			out.gistErr = err.Error()
+			log.Printf("更新 gist 失败: %s", err)
+		} else {
+			out.gistOK = true
 		}
 	}
 
@@ -252,9 +315,99 @@ func saveConfig(results []*speedtester.Result, filter resultFilter) error {
 			repositoryFilePath = outputFilename
 		}
 		if err := uploader.UpdateRepoFile(*repoToken, *repoAddress, repositoryFilePath, *repoBranch, yamlData); err != nil {
-			log.Printf("update repo file failed: %s", err)
+			out.repoErr = err.Error()
+			log.Printf("更新 repo 文件失败: %s", err)
+		} else {
+			out.repoOK = true
 		}
 	}
 
-	return nil
+	return out, nil
+}
+
+func buildPostTestCallback(enabled bool, timeout time.Duration) func(result *speedtester.Result) {
+	if !enabled {
+		return nil
+	}
+	return func(result *speedtester.Result) {
+		if result.Proxy == nil {
+			return
+		}
+		result.UnlockServices = unlock.CheckServices(result.Proxy, timeout)
+	}
+}
+
+// marshalConfigNoWrap 避免 yaml.v2 长字符串折行。
+// 策略：用短占位符替换长字符串值，marshal 后用 yamlDoubleQuote 还原为单行引号格式。
+func marshalConfigNoWrap(proxies []map[string]any) ([]byte, error) {
+	type phEntry struct {
+		placeholder string
+		origValue   string
+	}
+	var phEntries []phEntry
+	phCounter := 0
+
+	converted := make([]map[string]any, len(proxies))
+	for i, proxy := range proxies {
+		m := make(map[string]any, len(proxy))
+		for k, v := range proxy {
+			if s, ok := v.(string); ok && len(s) > 60 {
+				ph := fmt.Sprintf("XPLACEHOLDER%dX", phCounter)
+				phCounter++
+				phEntries = append(phEntries, phEntry{ph, s})
+				m[k] = ph
+			} else {
+				m[k] = v
+			}
+		}
+		converted[i] = m
+	}
+
+	config := &speedtester.RawConfig{Proxies: converted}
+	data, err := yaml.Marshal(config)
+	if err != nil {
+		return nil, err
+	}
+
+	result := string(data)
+	for _, entry := range phEntries {
+		quoted := yamlDoubleQuote(entry.origValue)
+		result = strings.Replace(result, entry.placeholder, quoted, 1)
+	}
+	return []byte(result), nil
+}
+
+// yamlDoubleQuote 将字符串编码为 YAML 双引号格式（单行，不折行）。
+// 与 yaml.v2 风格一致：仅转义 emoji（>U+FFFF）和控制字符，其余 Unicode 原样输出。
+func yamlDoubleQuote(s string) string {
+	var buf strings.Builder
+	buf.Grow(len(s) + 2)
+	buf.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '\\':
+			buf.WriteString(`\\`)
+		case '"':
+			buf.WriteString(`\"`)
+		case '\n':
+			buf.WriteString(`\n`)
+		case '\r':
+			buf.WriteString(`\r`)
+		case '\t':
+			buf.WriteString(`\t`)
+		default:
+			if r > 0xFFFF {
+				// emoji 等超出 BMP 的字符转义为 \U 序列
+				fmt.Fprintf(&buf, `\U%08X`, r)
+			} else if r >= 0x20 && r != 0x7F {
+				// 可打印 Unicode 原样输出（包括 CJK、全角等）
+				buf.WriteRune(r)
+			} else {
+				// 控制字符转义
+				fmt.Fprintf(&buf, `\x%02x`, r)
+			}
+		}
+	}
+	buf.WriteByte('"')
+	return buf.String()
 }

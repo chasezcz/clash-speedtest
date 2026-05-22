@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -38,6 +39,8 @@ type Config struct {
 	Mode             SpeedMode
 	OutputPath       string
 	UserAgent        string // optional; empty means use default (mihomo kernel UA)
+	LatencyRetries   int    // 延迟测试轮数，每轮 6 次 ping
+	PostTest         func(result *Result) // 测试完成后的回调，可用于补充 unlock 等信息
 }
 
 type serverMode int
@@ -92,6 +95,9 @@ type SpeedTester struct {
 func New(config *Config) (*SpeedTester, error) {
 	if config.Concurrent <= 0 {
 		config.Concurrent = 1
+	}
+	if config.LatencyRetries <= 0 {
+		config.LatencyRetries = 2
 	}
 	if config.DownloadSize < 0 {
 		config.DownloadSize = 100 * 1024 * 1024
@@ -161,11 +167,32 @@ func resolveServerTarget(rawURL string) (*serverTarget, error) {
 type CProxy struct {
 	constant.Proxy
 	Config map[string]any
+	Source string
 }
 
 type RawConfig struct {
 	Providers map[string]map[string]any `yaml:"proxy-providers"`
 	Proxies   []map[string]any          `yaml:"proxies"`
+}
+
+func deriveSourceName(configPath string) string {
+	trimmed := strings.TrimSpace(configPath)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+		u, err := url.Parse(trimmed)
+		if err != nil {
+			return ""
+		}
+		return u.Hostname()
+	}
+	base := filepath.Base(trimmed)
+	ext := filepath.Ext(base)
+	if ext == ".yaml" || ext == ".yml" {
+		return strings.TrimSuffix(base, ext)
+	}
+	return base
 }
 
 func (st *SpeedTester) LoadProxies() (map[string]*CProxy, error) {
@@ -174,6 +201,7 @@ func (st *SpeedTester) LoadProxies() (map[string]*CProxy, error) {
 	st.blockedNodeCount = 0
 
 	for configPath := range strings.SplitSeq(st.config.ConfigPaths, ",") {
+		source := deriveSourceName(configPath)
 		var body []byte
 		var err error
 		if strings.HasPrefix(configPath, "http") {
@@ -209,7 +237,7 @@ func (st *SpeedTester) LoadProxies() (map[string]*CProxy, error) {
 			if _, exist := proxies[proxy.Name()]; exist {
 				return nil, fmt.Errorf("proxy %s is the duplicate name", proxy.Name())
 			}
-			proxies[proxy.Name()] = &CProxy{Proxy: proxy, Config: config}
+			proxies[proxy.Name()] = &CProxy{Proxy: proxy, Config: config, Source: source}
 		}
 		for name, config := range providersConfig {
 			if name == provider.ReservedName {
@@ -246,6 +274,7 @@ func (st *SpeedTester) LoadProxies() (map[string]*CProxy, error) {
 				proxies[fmt.Sprintf("[%s] %s", name, proxy.Name())] = &CProxy{
 					Proxy:  proxy,
 					Config: pdProxies[proxy.Name()],
+					Source: name,
 				}
 			}
 		}
@@ -356,20 +385,23 @@ func (st *SpeedTester) TestProxiesUntil(proxies map[string]*CProxy, tester func(
 }
 
 type Result struct {
-	ProxyName     string         `json:"proxy_name"`
-	ProxyType     string         `json:"proxy_type"`
-	ProxyConfig   map[string]any `json:"proxy_config"`
-	Latency       time.Duration  `json:"latency"`
-	Jitter        time.Duration  `json:"jitter"`
-	PacketLoss    float64        `json:"packet_loss"`
-	DownloadSize  float64        `json:"download_size"`
-	DownloadTime  time.Duration  `json:"download_time"`
-	DownloadSpeed float64        `json:"download_speed"`
-	DownloadError string         `json:"download_error"`
-	UploadSize    float64        `json:"upload_size"`
-	UploadTime    time.Duration  `json:"upload_time"`
-	UploadSpeed   float64        `json:"upload_speed"`
-	UploadError   string         `json:"upload_error"`
+	ProxyName      string           `json:"proxy_name"`
+	ProxyType      string           `json:"proxy_type"`
+	ProxyConfig    map[string]any   `json:"proxy_config"`
+	Proxy          constant.Proxy   `json:"-"`
+	Source         string           `json:"source"`
+	Latency        time.Duration    `json:"latency"`
+	Jitter         time.Duration    `json:"jitter"`
+	PacketLoss     float64          `json:"packet_loss"`
+	DownloadSize   float64          `json:"download_size"`
+	DownloadTime   time.Duration    `json:"download_time"`
+	DownloadSpeed  float64          `json:"download_speed"`
+	DownloadError  string           `json:"download_error"`
+	UploadSize     float64          `json:"upload_size"`
+	UploadTime     time.Duration    `json:"upload_time"`
+	UploadSpeed    float64          `json:"upload_speed"`
+	UploadError    string           `json:"upload_error"`
+	UnlockServices []string         `json:"unlock_services,omitempty"`
 }
 
 func (r *Result) FormatDownloadSpeed() string {
@@ -445,6 +477,12 @@ func (st *SpeedTester) testProxy(name string, proxy *CProxy) *Result {
 		ProxyName:   name,
 		ProxyType:   proxy.Type().String(),
 		ProxyConfig: proxy.Config,
+		Proxy:       proxy.Proxy,
+		Source:      proxy.Source,
+	}
+	// PostTest 在所有模式下都需要执行（包括 fast 模式），用 defer 保证
+	if st.config.PostTest != nil {
+		defer st.config.PostTest(result)
 	}
 
 	// 1. 首先进行延迟测试
@@ -525,6 +563,7 @@ func (st *SpeedTester) testProxy(name string, proxy *CProxy) *Result {
 		}
 	}
 
+
 	return result
 }
 
@@ -535,31 +574,34 @@ type latencyResult struct {
 }
 
 func (st *SpeedTester) testLatency(proxy constant.Proxy, minLatency time.Duration) *latencyResult {
-	client := st.createClient(proxy, minLatency)
-	defer client.CloseIdleConnections()
-
-	latencies := make([]time.Duration, 0, 6)
+	rounds := st.config.LatencyRetries
+	totalPings := rounds * 6
+	latencies := make([]time.Duration, 0, totalPings)
 	failedPings := 0
 
-	for range 6 {
-		time.Sleep(100 * time.Millisecond)
+	for range rounds {
+		client := st.createClient(proxy, minLatency)
+		for range 6 {
+			time.Sleep(100 * time.Millisecond)
 
-		start := time.Now()
-		req, err := http.NewRequest(http.MethodHead, st.downloadURL, nil)
-		if err != nil {
-			failedPings++
-			continue
+			start := time.Now()
+			req, err := http.NewRequest(http.MethodHead, st.downloadURL, nil)
+			if err != nil {
+				failedPings++
+				continue
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				failedPings++
+				continue
+			}
+			resp.Body.Close()
+			latencies = append(latencies, time.Since(start))
 		}
-		resp, err := client.Do(req)
-		if err != nil {
-			failedPings++
-			continue
-		}
-		resp.Body.Close()
-		latencies = append(latencies, time.Since(start))
+		client.CloseIdleConnections()
 	}
 
-	return calculateLatencyStats(latencies, failedPings)
+	return calculateLatencyStats(latencies, failedPings, totalPings)
 }
 
 type downloadResult struct {
@@ -735,9 +777,9 @@ func (st *SpeedTester) createClient(proxy constant.Proxy, timeout time.Duration)
 	}
 }
 
-func calculateLatencyStats(latencies []time.Duration, failedPings int) *latencyResult {
+func calculateLatencyStats(latencies []time.Duration, failedPings, totalPings int) *latencyResult {
 	result := &latencyResult{
-		packetLoss: float64(failedPings) / 6.0 * 100,
+		packetLoss: float64(failedPings) / float64(totalPings) * 100,
 	}
 
 	if len(latencies) == 0 {

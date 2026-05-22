@@ -10,7 +10,7 @@ import (
 
 func TestHelpViewShowsQuitAndDetailKeys(t *testing.T) {
 	resultChannel := make(chan *speedtester.Result, 1)
-	model := NewTUIModel(speedtester.SpeedModeDownload, 1, resultChannel)
+	model := NewTUIModel(speedtester.SpeedModeDownload, 1, resultChannel, nil)
 	model.windowWidth = 80
 	model.windowHeight = 20
 

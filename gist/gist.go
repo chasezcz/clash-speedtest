@@ -139,6 +139,52 @@ func (u *Uploader) UpdateFile(token, address, filename string, content []byte) e
 	return nil
 }
 
+func (u *Uploader) UpdateFiles(token, address string, files map[string][]byte) error {
+	if token == "" {
+		return fmt.Errorf("gist token is empty")
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("no files to upload")
+	}
+
+	gistID, err := ParseGistID(address)
+	if err != nil {
+		return err
+	}
+
+	gistFiles := make(map[string]gistFile, len(files))
+	for name, content := range files {
+		gistFiles[name] = gistFile{Content: string(content)}
+	}
+	payload := updateRequest{Files: gistFiles}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("build gist payload for %s failed: %w", gistID, err)
+	}
+
+	request, err := http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/gists/%s", u.apiBase, gistID), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create request for gist %s failed: %w", gistID, err)
+	}
+	request.Header.Set("Authorization", "token "+token)
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", u.userAgent)
+
+	resp, err := u.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("update gist %s request failed: %w", gistID, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		responseBody := readResponseBody(resp.Body)
+		return fmt.Errorf("update gist %s failed: status %s, body: %s", gistID, resp.Status, responseBody)
+	}
+
+	return nil
+}
+
 func lastPathSegment(path string) string {
 	trimmed := strings.Trim(path, "/")
 	if trimmed == "" {

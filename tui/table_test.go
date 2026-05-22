@@ -11,7 +11,7 @@ import (
 // TestTUIModelColorizeRow tests the colorizeRow function
 func TestTUIModelColorizeRow(t *testing.T) {
 	resultChannel := make(chan *speedtester.Result, 10)
-	model := NewTUIModel(speedtester.SpeedModeFull, 1, resultChannel)
+	model := NewTUIModel(speedtester.SpeedModeFull, 1, resultChannel, nil)
 
 	// Test latency coloring
 	t.Run("LatencyGreen", func(t *testing.T) {
@@ -192,7 +192,7 @@ func TestTUIModelColorizeRow(t *testing.T) {
 // TestTUIModelUpdateTableRows tests the updateTableRows function
 func TestTUIModelUpdateTableRows(t *testing.T) {
 	resultChannel := make(chan *speedtester.Result, 10)
-	model := NewTUIModel(speedtester.SpeedModeFull, 2, resultChannel)
+	model := NewTUIModel(speedtester.SpeedModeFull, 2, resultChannel, nil)
 
 	// Add a result
 	result := &speedtester.Result{
@@ -222,7 +222,7 @@ func TestTUIModelUpdateTableRows(t *testing.T) {
 // TestTUIModelUpdateTableRowsFastMode tests the updateTableRows function in fast mode
 func TestTUIModelUpdateTableRowsFastMode(t *testing.T) {
 	resultChannel := make(chan *speedtester.Result, 10)
-	model := NewTUIModel(speedtester.SpeedModeFast, 2, resultChannel)
+	model := NewTUIModel(speedtester.SpeedModeFast, 2, resultChannel, nil)
 
 	// Add a result
 	result := &speedtester.Result{

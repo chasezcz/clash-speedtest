@@ -14,7 +14,7 @@ func TestPerfTrackerRecordsSortAndRowsOnResultUpdate(t *testing.T) {
 	t.Setenv("CLASH_SPEEDTEST_TUI_PERF_LOG_EVERY", "0")
 
 	resultChannel := make(chan *speedtester.Result, 1)
-	model := NewTUIModel(speedtester.SpeedModeDownload, 20, resultChannel)
+	model := NewTUIModel(speedtester.SpeedModeDownload, 20, resultChannel, nil)
 
 	updates := 20
 	for i := 0; i < updates; i++ {
@@ -48,7 +48,7 @@ func TestPerfTrackerRecordsLayoutOnDetailScroll(t *testing.T) {
 	t.Setenv("CLASH_SPEEDTEST_TUI_PERF_LOG_EVERY", "0")
 
 	resultChannel := make(chan *speedtester.Result, 1)
-	model := NewTUIModel(speedtester.SpeedModeDownload, 5, resultChannel)
+	model := NewTUIModel(speedtester.SpeedModeDownload, 5, resultChannel, nil)
 	model.results = []*speedtester.Result{
 		{ProxyName: "Proxy 1", ProxyType: "SS", ProxyConfig: map[string]any{}},
 		{ProxyName: "Proxy 2", ProxyType: "SS", ProxyConfig: map[string]any{}},
@@ -81,7 +81,7 @@ func TestPerfTrackerUpdatesLayoutWhenDetailHeightChanges(t *testing.T) {
 	t.Setenv("CLASH_SPEEDTEST_TUI_PERF_LOG_EVERY", "0")
 
 	resultChannel := make(chan *speedtester.Result, 1)
-	model := NewTUIModel(speedtester.SpeedModeDownload, 2, resultChannel)
+	model := NewTUIModel(speedtester.SpeedModeDownload, 2, resultChannel, nil)
 	model.results = []*speedtester.Result{
 		{ProxyName: "Proxy 1", ProxyType: "SS", ProxyConfig: map[string]any{}},
 		{
